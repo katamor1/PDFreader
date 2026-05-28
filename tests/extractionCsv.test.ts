@@ -63,4 +63,38 @@ describe("extraction CSV", () => {
       "pdfreader-ocr-20260528-010203.csv"
     );
   });
+
+  it("escapes cells that spreadsheet apps would treat as formulas", () => {
+    const riskyDocument: ExtractionDocument = {
+      ...document,
+      sourcePdf: {
+        ...document.sourcePdf,
+        path: "=cmd",
+        relativePath: "+relative"
+      },
+      format: {
+        ...document.format,
+        name: "@format"
+      },
+      pages: [
+        {
+          pageNumber: 1,
+          fields: [
+            {
+              fieldId: "field-risky",
+              tag: "-tag",
+              text: "=2+2",
+              confidence: 1,
+              warning: "@review"
+            }
+          ]
+        }
+      ]
+    };
+
+    const row = buildExtractionCsv([riskyDocument]).split("\r\n")[1];
+    expect(row).toBe(
+      "'=cmd,'+relative,fmt-order-2026,'@format,purchase_order,2026-05-28T01:00:00.000Z,1,'-tag,'=2+2,1,'@review"
+    );
+  });
 });

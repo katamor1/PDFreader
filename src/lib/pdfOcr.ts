@@ -1,6 +1,5 @@
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
-import Tesseract from "tesseract.js";
 
 import { applyBlackWhiteContrast } from "./imagePreprocessing";
 import { fromNormalizedRect } from "./templateGeometry";
@@ -8,7 +7,8 @@ import type { OcrTemplate, PdfFile, RecognizedField } from "./types";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-type OcrWorker = Awaited<ReturnType<typeof Tesseract.createWorker>>;
+type TesseractApi = typeof import("tesseract.js");
+type OcrWorker = Awaited<ReturnType<TesseractApi["createWorker"]>>;
 type ProgressCallback = (message: string, progress?: number) => void;
 
 export function pdfUrl(file: PdfFile): string {
@@ -33,6 +33,7 @@ export async function loadPdfInfo(file: PdfFile): Promise<{ pages?: number; size
 }
 
 export async function createOcrWorker(onProgress?: ProgressCallback): Promise<OcrWorker> {
+  const Tesseract = await import("tesseract.js");
   const worker = await Tesseract.createWorker("jpn+eng", undefined, {
     logger: (message) => {
       if (message.status) {
@@ -103,7 +104,11 @@ async function renderPageToCanvas(input: {
   pageNumber: number;
 }) {
   if (input.pdf) {
-    return renderPdfJsPageToCanvas(input.pdf, input.pageNumber);
+    try {
+      return await renderPdfJsPageToCanvas(input.pdf, input.pageNumber);
+    } catch {
+      return renderPdfPageImageToCanvas(input.file, input.pageNumber, 300);
+    }
   }
 
   return renderPdfPageImageToCanvas(input.file, input.pageNumber, 300);

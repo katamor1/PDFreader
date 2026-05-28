@@ -11,10 +11,30 @@ export type PdfPageImage = {
   fromCache: boolean;
 };
 
-function pdfCacheKey(pdfPath: string, pageNumber: number, dpi: number) {
+export type PdfPageCacheInput = {
+  pdfPath: string;
+  pageNumber: number;
+  dpi: number;
+  sizeBytes: number;
+  modifiedAtMs: number;
+};
+
+export function buildPdfPageCacheKey(input: PdfPageCacheInput) {
   return createHash("sha1")
-    .update(`${path.resolve(pdfPath)}\0${pageNumber}\0${dpi}`)
+    .update(
+      [
+        path.resolve(input.pdfPath),
+        input.pageNumber,
+        input.dpi,
+        input.sizeBytes,
+        Math.trunc(input.modifiedAtMs)
+      ].join("\0")
+    )
     .digest("hex");
+}
+
+export function pdfPageImagePath(cacheDir: string, cacheKey: string) {
+  return path.join(path.resolve(cacheDir), `${cacheKey}.png`);
 }
 
 export function parsePdfInfoPages(output: string): number | undefined {
@@ -48,9 +68,16 @@ export async function rasterizePdfPage(input: {
   const pageNumber = Math.max(1, Math.trunc(input.pageNumber));
   const dpi = Math.max(72, Math.min(450, Math.trunc(input.dpi ?? 180)));
   const cacheDir = path.resolve(input.cacheDir);
-  const key = pdfCacheKey(input.pdfPath, pageNumber, dpi);
+  const pdfStats = await stat(input.pdfPath);
+  const key = buildPdfPageCacheKey({
+    pdfPath: input.pdfPath,
+    pageNumber,
+    dpi,
+    sizeBytes: pdfStats.size,
+    modifiedAtMs: pdfStats.mtimeMs
+  });
   const outputPrefix = path.join(cacheDir, key);
-  const expectedImagePath = `${outputPrefix}-${pageNumber}.png`;
+  const expectedImagePath = pdfPageImagePath(cacheDir, key);
 
   try {
     await access(expectedImagePath);

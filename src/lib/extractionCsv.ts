@@ -16,11 +16,16 @@ const CSV_HEADERS = [
 
 function csvCell(value: string | number | undefined): string {
   const text = value === undefined ? "" : String(value);
-  if (!/[",\r\n\\/]/.test(text)) {
-    return text;
+  const safeText = typeof value === "number" ? text : escapeSpreadsheetFormula(text);
+  if (!/[",\r\n\\/]/.test(safeText)) {
+    return safeText;
   }
 
-  return `"${text.replace(/"/g, "\"\"")}"`;
+  return `"${safeText.replace(/"/g, "\"\"")}"`;
+}
+
+function escapeSpreadsheetFormula(text: string): string {
+  return /^[\s]*[=+\-@]/.test(text) ? `'${text}` : text;
 }
 
 export function makeCsvOutputFileName(extractedAt: string): string {

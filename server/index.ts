@@ -10,6 +10,7 @@ import { buildExtractionCsv, makeCsvOutputFileName } from "../src/lib/extraction
 import type { ExtractionDocument, OcrTemplate } from "../src/lib/types";
 import { parseRangeHeader } from "./pdfHttp";
 import { findPdfFiles } from "./pdfScanner";
+import { isAllowedBrowserOrigin } from "./originPolicy";
 import { TemplateStore } from "./templateStore";
 import { getPdfPageCount, rasterizePdfPage } from "./pdfTools";
 
@@ -20,7 +21,28 @@ const dataDir = path.resolve(process.env.PDFREADER_DATA_DIR ?? path.join(project
 const pageImageCacheDir = path.join(dataDir, "page-cache");
 const templateStore = new TemplateStore(dataDir);
 
-app.use(cors());
+app.use((request, response, next) => {
+  const origin = request.headers.origin;
+  if (origin && !isAllowedBrowserOrigin(origin)) {
+    response.status(403).json({ error: "Origin is not allowed" });
+    return;
+  }
+
+  next();
+});
+app.use(
+  cors({
+    origin(origin, callback) {
+      callback(null, origin && isAllowedBrowserOrigin(origin) ? origin : false);
+    },
+    exposedHeaders: [
+      "Accept-Ranges",
+      "Content-Range",
+      "Content-Length",
+      "X-PDFReader-Render-Mode"
+    ]
+  })
+);
 app.use(express.json({ limit: "25mb" }));
 
 app.get("/api/health", (_request, response) => {

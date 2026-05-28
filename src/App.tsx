@@ -8,12 +8,15 @@ import {
   ScanText,
   Trash2
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 
-import { PdfPreview } from "./components/PdfPreview";
 import { api } from "./lib/api";
 import { buildExtractionDocument } from "./lib/extractionJson";
-import { createOcrWorker, recognizeTemplateFields } from "./lib/pdfOcr";
+import {
+  currentExtractionDocuments,
+  removeExtractionForFile,
+  removeExtractionsForTemplate
+} from "./lib/extractionState";
 import type {
   ExtractionDocument,
   NormalizedRect,
@@ -23,11 +26,16 @@ import type {
 } from "./lib/types";
 
 type Assignments = Record<string, string>;
+type OcrWorker = Awaited<ReturnType<typeof import("./lib/pdfOcr")["createOcrWorker"]>>;
 type JobState = {
   running: boolean;
   message: string;
   progress?: number;
 };
+
+const PdfPreview = lazy(() =>
+  import("./components/PdfPreview").then((module) => ({ default: module.PdfPreview }))
+);
 
 const nowIso = () => new Date().toISOString();
 
@@ -65,6 +73,10 @@ export default function App() {
   const activeTemplate = templates.find((template) => template.id === activeTemplateId);
   const selectedField = activeTemplate?.fields.find((field) => field.id === selectedFieldId);
   const assignedCount = files.filter((file) => assignments[file.id]).length;
+  const extractionDocuments = useMemo(
+    () => currentExtractionDocuments(files, extractions),
+    [extractions, files]
+  );
 
   const readyFiles = useMemo(
     () =>
@@ -93,7 +105,10 @@ export default function App() {
       const response = await api.scan(rootDir);
       setRootDir(response.rootDir);
       setFiles(response.files);
+      setAssignments({});
+      setExtractions({});
       setSelectedFileId(response.files[0]?.id);
+      setSelectedFieldId(undefined);
       setJob({ running: false, message: `${response.files.length}件のPDF` });
     } catch (error) {
       setJob({ running: false, message: error instanceof Error ? error.message : "PDF検索失敗" });
@@ -101,23 +116,34 @@ export default function App() {
   }
 
   async function addTemplate() {
-    const template = createTemplate(newTemplateName, newDocumentType);
-    const saved = await api.saveTemplate(template);
-    setTemplates((current) => [...current, saved].sort((a, b) => a.name.localeCompare(b.name)));
-    setActiveTemplateId(saved.id);
-    setSelectedFieldId(undefined);
+    if (job.running) {
+      return;
+    }
+
+    setJob({ running: true, message: "フォーマット作成中" });
+    try {
+      const template = createTemplate(newTemplateName, newDocumentType);
+      const saved = await api.saveTemplate(template);
+      setTemplates((current) => [...current, saved].sort((a, b) => a.name.localeCompare(b.name)));
+      setActiveTemplateId(saved.id);
+      setSelectedFieldId(undefined);
+      setJob({ running: false, message: "フォーマット作成済み" });
+    } catch (error) {
+      setJob({ running: false, message: error instanceof Error ? error.message : "作成失敗" });
+    }
   }
 
   function updateActiveTemplate(updater: (template: OcrTemplate) => OcrTemplate) {
-    if (!activeTemplate) {
+    if (!activeTemplate || job.running) {
       return;
     }
     const updated = { ...updater(activeTemplate), updatedAt: nowIso() };
     setTemplates((current) => current.map((template) => (template.id === updated.id ? updated : template)));
+    setExtractions((current) => removeExtractionsForTemplate(current, assignments, updated.id));
   }
 
   async function saveActiveTemplate() {
-    if (!activeTemplate) {
+    if (!activeTemplate || job.running) {
       return;
     }
     setJob({ running: true, message: "フォーマット保存中" });
@@ -131,28 +157,50 @@ export default function App() {
   }
 
   async function deleteActiveTemplate() {
-    if (!activeTemplate) {
+    if (!activeTemplate || job.running) {
       return;
     }
-    await api.deleteTemplate(activeTemplate.id);
-    setTemplates((current) => current.filter((template) => template.id !== activeTemplate.id));
-    setAssignments((current) => {
-      const next = { ...current };
-      for (const [fileId, templateId] of Object.entries(next)) {
-        if (templateId === activeTemplate.id) {
-          delete next[fileId];
+    const templateId = activeTemplate.id;
+    setJob({ running: true, message: "フォーマット削除中" });
+    try {
+      await api.deleteTemplate(templateId);
+      setTemplates((current) => current.filter((template) => template.id !== templateId));
+      setAssignments((current) => {
+        const next = { ...current };
+        for (const [fileId, assignedTemplateId] of Object.entries(next)) {
+          if (assignedTemplateId === templateId) {
+            delete next[fileId];
+          }
         }
-      }
-      return next;
-    });
-    setActiveTemplateId(undefined);
-    setSelectedFieldId(undefined);
+        return next;
+      });
+      setExtractions((current) => removeExtractionsForTemplate(current, assignments, templateId));
+      setActiveTemplateId(undefined);
+      setSelectedFieldId(undefined);
+      setJob({ running: false, message: "フォーマット削除済み" });
+    } catch (error) {
+      setJob({ running: false, message: error instanceof Error ? error.message : "削除失敗" });
+    }
   }
 
   function assignTemplate(fileId: string, templateId: string) {
-    setAssignments((current) => ({ ...current, [fileId]: templateId }));
+    if (job.running) {
+      return;
+    }
+
+    setAssignments((current) => {
+      const next = { ...current };
+      if (templateId) {
+        next[fileId] = templateId;
+      } else {
+        delete next[fileId];
+      }
+      return next;
+    });
+    setExtractions((current) => removeExtractionForFile(current, fileId));
     if (fileId === selectedFileId) {
-      setActiveTemplateId(templateId);
+      setActiveTemplateId(templateId || undefined);
+      setSelectedFieldId(undefined);
     }
   }
 
@@ -165,6 +213,10 @@ export default function App() {
   }
 
   function addField(field: OcrField) {
+    if (job.running) {
+      return;
+    }
+
     updateActiveTemplate((template) => ({
       ...template,
       fields: [...template.fields, field]
@@ -173,7 +225,7 @@ export default function App() {
   }
 
   function updateSelectedField(patch: Partial<OcrField>) {
-    if (!selectedField) {
+    if (!selectedField || job.running) {
       return;
     }
     updateActiveTemplate((template) => ({
@@ -185,6 +237,10 @@ export default function App() {
   }
 
   function updateFieldRect(fieldId: string, rect: NormalizedRect) {
+    if (job.running) {
+      return;
+    }
+
     updateActiveTemplate((template) => ({
       ...template,
       fields: template.fields.map((field) =>
@@ -194,7 +250,7 @@ export default function App() {
   }
 
   function deleteSelectedField() {
-    if (!selectedField) {
+    if (!selectedField || job.running) {
       return;
     }
     updateActiveTemplate((template) => ({
@@ -209,12 +265,14 @@ export default function App() {
       return;
     }
 
-    setJob({ running: true, message: "OCR初期化中", progress: 0 });
-    const worker = await createOcrWorker((message, progress) =>
-      setJob({ running: true, message, progress })
-    );
+    let worker: OcrWorker | undefined;
 
     try {
+      setJob({ running: true, message: "OCR初期化中", progress: 0 });
+      const ocr = await import("./lib/pdfOcr");
+      worker = await ocr.createOcrWorker((message, progress) =>
+        setJob({ running: true, message, progress })
+      );
       const nextExtractions: Record<string, ExtractionDocument> = {};
       for (const file of targetFiles) {
         const template = templates.find((item) => item.id === assignments[file.id]);
@@ -223,7 +281,7 @@ export default function App() {
         }
 
         setJob({ running: true, message: `${file.name} OCR中`, progress: 0 });
-        const recognizedFields = await recognizeTemplateFields({
+        const recognizedFields = await ocr.recognizeTemplateFields({
           file,
           template,
           worker,
@@ -242,12 +300,16 @@ export default function App() {
     } catch (error) {
       setJob({ running: false, message: error instanceof Error ? error.message : "OCR失敗" });
     } finally {
-      await worker.terminate();
+      try {
+        await worker?.terminate();
+      } catch {
+        // OCR result handling has already completed or failed; worker cleanup errors are non-actionable here.
+      }
     }
   }
 
   async function saveJson() {
-    const documents = Object.values(extractions);
+    const documents = extractionDocuments;
     if (documents.length === 0) {
       return;
     }
@@ -263,7 +325,7 @@ export default function App() {
   }
 
   async function saveCsv() {
-    const documents = Object.values(extractions);
+    const documents = extractionDocuments;
     if (documents.length === 0) {
       return;
     }
@@ -282,7 +344,7 @@ export default function App() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand">
-            <ScanText size={26} />
+          <ScanText size={26} />
           <div>
             <h1>PDFreader OCR</h1>
             <p>矩形フォーマットからJSON/CSVを生成</p>
@@ -322,11 +384,11 @@ export default function App() {
           <Play size={17} />
           割当済み一括OCR
         </button>
-        <button type="button" onClick={saveJson} disabled={!Object.keys(extractions).length || job.running}>
+        <button type="button" onClick={saveJson} disabled={!extractionDocuments.length || job.running}>
           <Save size={17} />
           JSON保存
         </button>
-        <button type="button" onClick={saveCsv} disabled={!Object.keys(extractions).length || job.running}>
+        <button type="button" onClick={saveCsv} disabled={!extractionDocuments.length || job.running}>
           <Save size={17} />
           CSV保存
         </button>
@@ -349,6 +411,7 @@ export default function App() {
                 </button>
                 <select
                   value={assignments[file.id] ?? ""}
+                  disabled={job.running}
                   onChange={(event) => assignTemplate(file.id, event.target.value)}
                 >
                   <option value="">未選択</option>
@@ -365,14 +428,27 @@ export default function App() {
           </div>
         </section>
 
-        <PdfPreview
-          file={selectedFile}
-          template={activeTemplate}
-          selectedFieldId={selectedFieldId}
-          onSelectField={setSelectedFieldId}
-          onAddField={addField}
-          onUpdateFieldRect={updateFieldRect}
-        />
+        <Suspense
+          fallback={
+            <section className="preview-panel panel">
+              <div className="panel-header preview-header">
+                <div>
+                  <h2>PDFプレビュー</h2>
+                  <p>読込中</p>
+                </div>
+              </div>
+            </section>
+          }
+        >
+          <PdfPreview
+            file={selectedFile}
+            template={activeTemplate}
+            selectedFieldId={selectedFieldId}
+            onSelectField={setSelectedFieldId}
+            onAddField={addField}
+            onUpdateFieldRect={updateFieldRect}
+          />
+        </Suspense>
 
         <aside className="panel template-panel">
           <div className="panel-header">
@@ -397,7 +473,7 @@ export default function App() {
                 <option value="document">その他</option>
               </select>
             </label>
-            <button type="button" onClick={addTemplate}>
+            <button type="button" onClick={addTemplate} disabled={job.running}>
               <Archive size={17} />
               作成
             </button>
@@ -429,6 +505,7 @@ export default function App() {
                 <span>フォーマット名</span>
                 <input
                   value={activeTemplate.name}
+                  disabled={job.running}
                   onChange={(event) =>
                     updateActiveTemplate((template) => ({ ...template, name: event.target.value }))
                   }
@@ -438,17 +515,18 @@ export default function App() {
                 <span>文書種別</span>
                 <input
                   value={activeTemplate.documentType}
+                  disabled={job.running}
                   onChange={(event) =>
                     updateActiveTemplate((template) => ({ ...template, documentType: event.target.value }))
                   }
                 />
               </label>
               <div className="button-row">
-                <button type="button" onClick={saveActiveTemplate}>
+                <button type="button" onClick={saveActiveTemplate} disabled={job.running}>
                   <Save size={17} />
                   保存
                 </button>
-                <button className="danger" type="button" onClick={deleteActiveTemplate}>
+                <button className="danger" type="button" onClick={deleteActiveTemplate} disabled={job.running}>
                   <Trash2 size={17} />
                   削除
                 </button>
@@ -474,10 +552,11 @@ export default function App() {
                     <span>タグ</span>
                     <input
                       value={selectedField.tag}
+                      disabled={job.running}
                       onChange={(event) => updateSelectedField({ tag: event.target.value })}
                     />
                   </label>
-                  <button className="danger secondary" type="button" onClick={deleteSelectedField}>
+                  <button className="danger secondary" type="button" onClick={deleteSelectedField} disabled={job.running}>
                     <Trash2 size={17} />
                     項目削除
                   </button>

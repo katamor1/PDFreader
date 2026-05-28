@@ -98,9 +98,17 @@ export function PdfPreview({
       }
 
       const info = await loadPdfInfo(file);
+      if (cancelled) {
+        return;
+      }
+
       const fallbackPageCount = info.pages ?? Math.max(pageNumber, 1);
       const safePageNumber = Math.min(pageNumber, fallbackPageCount);
       const renderedCanvas = await renderPdfPageImageToCanvas(file, safePageNumber, 180);
+      if (cancelled) {
+        return;
+      }
+
       const maxWidth = Math.min(980, canvas.parentElement?.clientWidth ?? 980);
 
       paintRenderedCanvas(renderedCanvas, maxWidth, context, canvas);
@@ -116,15 +124,16 @@ export function PdfPreview({
       const context = canvas?.getContext("2d");
       if (!file || !canvas || !context) {
         setStatus("PDF未選択");
+        setPageCount(0);
         setCanvasSize({ width: 0, height: 0 });
         return;
       }
 
+      let pdf: Awaited<ReturnType<typeof loadPdf>> | undefined;
       try {
         setStatus("PDF読込中");
-        const pdf = await loadPdf(file);
+        pdf = await loadPdf(file);
         if (cancelled) {
-          await pdf.destroy();
           return;
         }
 
@@ -145,23 +154,30 @@ export function PdfPreview({
         context.fillStyle = "#fff";
         context.fillRect(0, 0, viewport.width, viewport.height);
         await page.render({ canvas, canvasContext: context, viewport }).promise;
-        await pdf.destroy();
 
         if (!cancelled) {
           setPageCount(pageCount);
           setPageNumber(safePageNumber);
           setCanvasSize({ width: viewport.width, height: viewport.height });
-          setStatus(`${safePageNumber} / ${pdf.numPages}`);
+          setStatus(`${safePageNumber} / ${pageCount}`);
         }
       } catch (error) {
         if (!cancelled) {
+          try {
+            await renderWithPageImageFallback(error, canvas, context);
+          } catch (fallbackError) {
+            if (!cancelled) {
+              setStatus(fallbackError instanceof Error ? fallbackError.message : "PDF読込失敗");
+            }
+          }
+        }
+      } finally {
         try {
-          await renderWithPageImageFallback(error, canvas, context);
-        } catch (fallbackError) {
-          setStatus(fallbackError instanceof Error ? fallbackError.message : "PDF読込失敗");
+          await pdf?.destroy();
+        } catch {
+          // Preview cleanup must not turn an already handled render failure into an unhandled promise.
         }
       }
-    }
     }
 
     void render();

@@ -16,7 +16,7 @@ export class TemplateStore {
 
   async list(): Promise<OcrTemplate[]> {
     const file = await this.readFile();
-    return file.templates.sort((a, b) => a.name.localeCompare(b.name));
+    return [...file.templates].sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async upsert(template: OcrTemplate): Promise<OcrTemplate> {
