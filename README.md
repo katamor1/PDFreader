@@ -9,9 +9,11 @@ The app covers only the extraction step. It does not check consistency across qu
 - Recursively scans a local folder for PDF files.
 - Lets each PDF choose a saved OCR format.
 - Previews a PDF page and lets the user draw tagged rectangles on top of it.
+- Falls back to Poppler page rasterization when PDF.js cannot preview a PDF that other readers can open.
 - Saves reusable formats such as `2026年度見積依頼書フォーマット`.
 - Runs OCR only inside the configured rectangles.
 - Writes one JSON extraction file per PDF.
+- Writes one aggregate CSV file for spreadsheet and downstream-system import.
 
 ## Run
 
@@ -31,12 +33,13 @@ The API listens on `http://127.0.0.1:4174`.
 2. Create or select a format.
 3. Select a PDF and draw rectangles in the preview.
 4. Select each rectangle and set its JSON tag.
-5. Save the format.
-6. Assign formats to PDFs in the list.
-7. Run OCR for the selected PDF or all assigned PDFs.
-8. Save JSON files.
+5. Re-select an existing rectangle later to move it by dragging, or resize it with the four corner handles.
+6. Save the format.
+7. Assign formats to PDFs in the list.
+8. Run OCR for the selected PDF or all assigned PDFs.
+9. Save JSON files, CSV, or both.
 
-If `JSON出力先` is empty, files are written under `data/output`.
+If `出力先` is empty, files are written under `data/output`.
 
 ## Stored Data
 
@@ -93,10 +96,28 @@ Each output file uses this high-level shape:
 }
 ```
 
+## CSV Shape
+
+CSV output is one aggregate file per save operation. Each recognized field becomes one row.
+
+The CSV is UTF-8 with BOM for Excel compatibility and uses these columns:
+
+```text
+source_pdf,relative_path,format_id,format_name,document_type,extracted_at,page_number,tag,text,confidence,warning
+```
+
 ## OCR Notes
 
 OCR runs in the browser with Tesseract.js using `jpn+eng`.
 
-The first OCR run may download language data. The current preprocessing is tuned for rectangular regions containing Japanese, alphabetic text, Arabic numerals, hyphens, yen signs, dollar signs, and common amount punctuation.
+The first OCR run may download language data. Before OCR, each selected rectangle is enlarged and converted to strict black-and-white pixels using automatic thresholding with a darker bias so faint scan text is retained. The preprocessing is tuned for rectangular regions containing Japanese, alphabetic text, Arabic numerals, hyphens, yen signs, dollar signs, and common amount punctuation.
 
 Very low resolution scans, skewed pages, handwriting, stamps over text, or fields that include heavy ruled lines may still need template adjustment or better source scans.
+
+## PDF Preview Compatibility
+
+The normal preview path uses PDF.js in the browser. Some PDFs that Adobe Reader or Microsoft Edge can open are still malformed or unusual enough for PDF.js to reject, especially small PDFs produced by printer drivers or legacy scanners.
+
+When PDF.js preview fails, the app asks the local API to render the requested page to PNG with `pdftocairo` and displays that image instead. The same fallback is used for OCR page rendering. This keeps the workflow available without manually re-saving the PDF through Microsoft Print to PDF.
+
+`pdftocairo` and `pdfinfo` must be available on `PATH` for this fallback. In this environment they are provided by TeX Live.

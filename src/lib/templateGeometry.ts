@@ -1,5 +1,7 @@
 import type { CanvasSize, NormalizedRect, OcrField, RenderedRect } from "./types";
 
+export type ResizeHandle = "nw" | "ne" | "sw" | "se";
+
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
 
@@ -50,4 +52,60 @@ export function createFieldFromDrag(
       canvasSize
     )
   };
+}
+
+export function moveNormalizedRect(
+  rect: NormalizedRect,
+  delta: { x: number; y: number },
+  canvasSize: CanvasSize
+): NormalizedRect {
+  const rendered = fromNormalizedRect(rect, canvasSize);
+  const nextX = clamp(rendered.x + delta.x, 0, canvasSize.width - rendered.width);
+  const nextY = clamp(rendered.y + delta.y, 0, canvasSize.height - rendered.height);
+
+  return toNormalizedRect(
+    {
+      ...rendered,
+      x: nextX,
+      y: nextY
+    },
+    canvasSize
+  );
+}
+
+export function resizeNormalizedRect(
+  rect: NormalizedRect,
+  handle: ResizeHandle,
+  delta: { x: number; y: number },
+  canvasSize: CanvasSize,
+  minPixels = 12
+): NormalizedRect {
+  const rendered = fromNormalizedRect(rect, canvasSize);
+  let left = rendered.x;
+  let top = rendered.y;
+  let right = rendered.x + rendered.width;
+  let bottom = rendered.y + rendered.height;
+
+  if (handle.includes("w")) {
+    left = clamp(left + delta.x, 0, right - minPixels);
+  }
+  if (handle.includes("e")) {
+    right = clamp(right + delta.x, left + minPixels, canvasSize.width);
+  }
+  if (handle.includes("n")) {
+    top = clamp(top + delta.y, 0, bottom - minPixels);
+  }
+  if (handle.includes("s")) {
+    bottom = clamp(bottom + delta.y, top + minPixels, canvasSize.height);
+  }
+
+  return toNormalizedRect(
+    {
+      x: left,
+      y: top,
+      width: right - left,
+      height: bottom - top
+    },
+    canvasSize
+  );
 }

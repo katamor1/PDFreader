@@ -2,6 +2,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import Tesseract from "tesseract.js";
 
+import { applyBlackWhiteContrast } from "./imagePreprocessing";
 import { fromNormalizedRect } from "./templateGeometry";
 import type { OcrTemplate, PdfFile, RecognizedField } from "./types";
 
@@ -14,8 +15,21 @@ export function pdfUrl(file: PdfFile): string {
   return `/api/pdf?path=${encodeURIComponent(file.path)}`;
 }
 
+export function pdfPageImageUrl(file: PdfFile, pageNumber: number, dpi = 180): string {
+  return `/api/pdf-page-image?path=${encodeURIComponent(file.path)}&page=${pageNumber}&dpi=${dpi}`;
+}
+
 export async function loadPdf(file: PdfFile) {
   return pdfjsLib.getDocument(pdfUrl(file)).promise;
+}
+
+export async function loadPdfInfo(file: PdfFile): Promise<{ pages?: number; sizeBytes: number }> {
+  const response = await fetch(`/api/pdf-info?path=${encodeURIComponent(file.path)}`);
+  if (!response.ok) {
+    throw new Error(`PDF info failed: ${response.status} ${response.statusText}`);
+  }
+
+  return (await response.json()) as { pages?: number; sizeBytes: number };
 }
 
 export async function createOcrWorker(onProgress?: ProgressCallback): Promise<OcrWorker> {
@@ -36,7 +50,7 @@ export async function createOcrWorker(onProgress?: ProgressCallback): Promise<Oc
   return worker;
 }
 
-async function renderPageToCanvas(pdf: Awaited<ReturnType<typeof loadPdf>>, pageNumber: number) {
+async function renderPdfJsPageToCanvas(pdf: Awaited<ReturnType<typeof loadPdf>>, pageNumber: number) {
   const page = await pdf.getPage(pageNumber);
   const viewport = page.getViewport({ scale: 2.5 });
   const canvas = document.createElement("canvas");
@@ -50,6 +64,49 @@ async function renderPageToCanvas(pdf: Awaited<ReturnType<typeof loadPdf>>, page
   canvas.height = Math.ceil(viewport.height);
   await page.render({ canvas, canvasContext: context, viewport }).promise;
   return canvas;
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error(`Could not load page image: ${src}`));
+    image.src = src;
+  });
+}
+
+export async function renderPdfPageImageToCanvas(
+  file: PdfFile,
+  pageNumber: number,
+  dpi = 180
+): Promise<HTMLCanvasElement> {
+  const image = await loadImage(pdfPageImageUrl(file, pageNumber, dpi));
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Canvas 2D context is not available");
+  }
+
+  canvas.width = image.naturalWidth || image.width;
+  canvas.height = image.naturalHeight || image.height;
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  return canvas;
+}
+
+async function renderPageToCanvas(input: {
+  file: PdfFile;
+  pdf?: Awaited<ReturnType<typeof loadPdf>>;
+  pageNumber: number;
+}) {
+  if (input.pdf) {
+    return renderPdfJsPageToCanvas(input.pdf, input.pageNumber);
+  }
+
+  return renderPdfPageImageToCanvas(input.file, input.pageNumber, 300);
 }
 
 function cropField(pageCanvas: HTMLCanvasElement, field: OcrTemplate["fields"][number]) {
@@ -89,7 +146,7 @@ function cropField(pageCanvas: HTMLCanvasElement, field: OcrTemplate["fields"][n
 }
 
 function preprocessCrop(sourceCanvas: HTMLCanvasElement) {
-  const scale = 2;
+  const scale = 3;
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d", { willReadFrequently: true });
 
@@ -104,17 +161,7 @@ function preprocessCrop(sourceCanvas: HTMLCanvasElement) {
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.drawImage(sourceCanvas, 0, 0, canvas.width, canvas.height);
 
-  const image = context.getImageData(0, 0, canvas.width, canvas.height);
-  for (let index = 0; index < image.data.length; index += 4) {
-    const gray =
-      image.data[index] * 0.299 +
-      image.data[index + 1] * 0.587 +
-      image.data[index + 2] * 0.114;
-    const contrasted = gray > 220 ? 255 : gray < 90 ? 0 : Math.round((gray - 90) * 1.96);
-    image.data[index] = contrasted;
-    image.data[index + 1] = contrasted;
-    image.data[index + 2] = contrasted;
-  }
+  const image = applyBlackWhiteContrast(context.getImageData(0, 0, canvas.width, canvas.height));
   context.putImageData(image, 0, 0);
 
   return canvas;
@@ -126,7 +173,12 @@ export async function recognizeTemplateFields(input: {
   worker: OcrWorker;
   onProgress?: ProgressCallback;
 }): Promise<RecognizedField[]> {
-  const pdf = await loadPdf(input.file);
+  let pdf: Awaited<ReturnType<typeof loadPdf>> | undefined;
+  try {
+    pdf = await loadPdf(input.file);
+  } catch {
+    pdf = undefined;
+  }
 
   try {
     const pages = new Map<number, HTMLCanvasElement>();
@@ -135,7 +187,14 @@ export async function recognizeTemplateFields(input: {
     for (const field of input.template.fields) {
       if (!pages.has(field.pageNumber)) {
         input.onProgress?.(`${input.file.name}: page ${field.pageNumber}`);
-        pages.set(field.pageNumber, await renderPageToCanvas(pdf, field.pageNumber));
+        pages.set(
+          field.pageNumber,
+          await renderPageToCanvas({
+            file: input.file,
+            pdf,
+            pageNumber: field.pageNumber
+          })
+        );
       }
 
       const pageCanvas = pages.get(field.pageNumber);
@@ -167,6 +226,6 @@ export async function recognizeTemplateFields(input: {
 
     return recognized;
   } finally {
-    await pdf.destroy();
+    await pdf?.destroy();
   }
 }

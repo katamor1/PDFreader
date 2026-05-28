@@ -1,9 +1,22 @@
 import { ChevronLeft, ChevronRight, Crosshair } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { fromNormalizedRect, createFieldFromDrag } from "../lib/templateGeometry";
-import { loadPdf } from "../lib/pdfOcr";
-import type { CanvasSize, OcrField, OcrTemplate, PdfFile, RenderedRect } from "../lib/types";
+import {
+  createFieldFromDrag,
+  fromNormalizedRect,
+  moveNormalizedRect,
+  resizeNormalizedRect
+} from "../lib/templateGeometry";
+import { loadPdf, loadPdfInfo, renderPdfPageImageToCanvas } from "../lib/pdfOcr";
+import type { ResizeHandle } from "../lib/templateGeometry";
+import type {
+  CanvasSize,
+  NormalizedRect,
+  OcrField,
+  OcrTemplate,
+  PdfFile,
+  RenderedRect
+} from "../lib/types";
 
 type Props = {
   file?: PdfFile;
@@ -11,6 +24,7 @@ type Props = {
   selectedFieldId?: string;
   onSelectField: (fieldId: string) => void;
   onAddField: (field: OcrField) => void;
+  onUpdateFieldRect: (fieldId: string, rect: NormalizedRect) => void;
 };
 
 type DragState = {
@@ -18,12 +32,24 @@ type DragState = {
   current: { x: number; y: number };
 };
 
+type EditDragState = {
+  fieldId: string;
+  mode: "move" | "resize";
+  handle?: ResizeHandle;
+  start: { x: number; y: number };
+  startRect: NormalizedRect;
+};
+
+const RESIZE_HANDLES: ResizeHandle[] = ["nw", "ne", "sw", "se"];
+const HANDLE_SIZE = 10;
+
 export function PdfPreview({
   file,
   template,
   selectedFieldId,
   onSelectField,
-  onAddField
+  onAddField,
+  onUpdateFieldRect
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<SVGSVGElement | null>(null);
@@ -32,6 +58,7 @@ export function PdfPreview({
   const [pageCount, setPageCount] = useState(0);
   const [status, setStatus] = useState("PDF未選択");
   const [drag, setDrag] = useState<DragState | null>(null);
+  const [editDrag, setEditDrag] = useState<EditDragState | null>(null);
 
   useEffect(() => {
     setPageNumber(1);
@@ -39,6 +66,50 @@ export function PdfPreview({
 
   useEffect(() => {
     let cancelled = false;
+
+    function paintRenderedCanvas(
+      renderedCanvas: HTMLCanvasElement,
+      maxWidth: number,
+      context: CanvasRenderingContext2D,
+      canvas: HTMLCanvasElement
+    ) {
+      const displayScale = Math.min(1, maxWidth / renderedCanvas.width);
+      const displayWidth = Math.max(1, Math.round(renderedCanvas.width * displayScale));
+      const displayHeight = Math.max(1, Math.round(renderedCanvas.height * displayScale));
+
+      canvas.width = renderedCanvas.width;
+      canvas.height = renderedCanvas.height;
+      canvas.style.width = `${displayWidth}px`;
+      canvas.style.height = `${displayHeight}px`;
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(renderedCanvas, 0, 0);
+      setCanvasSize({ width: displayWidth, height: displayHeight });
+    }
+
+    async function renderWithPageImageFallback(
+      error: unknown,
+      canvas: HTMLCanvasElement,
+      context: CanvasRenderingContext2D
+    ) {
+      if (!file) {
+        return;
+      }
+
+      const info = await loadPdfInfo(file);
+      const fallbackPageCount = info.pages ?? Math.max(pageNumber, 1);
+      const safePageNumber = Math.min(pageNumber, fallbackPageCount);
+      const renderedCanvas = await renderPdfPageImageToCanvas(file, safePageNumber, 180);
+      const maxWidth = Math.min(980, canvas.parentElement?.clientWidth ?? 980);
+
+      paintRenderedCanvas(renderedCanvas, maxWidth, context, canvas);
+      setPageCount(fallbackPageCount);
+      setPageNumber(safePageNumber);
+      const reason = error instanceof Error ? error.message : "PDF.js読込失敗";
+      setStatus(`${safePageNumber} / ${fallbackPageCount} 画像フォールバック`);
+      console.warn("PDF.js preview failed; using page image fallback.", reason);
+    }
 
     async function render() {
       const canvas = canvasRef.current;
@@ -84,9 +155,13 @@ export function PdfPreview({
         }
       } catch (error) {
         if (!cancelled) {
-          setStatus(error instanceof Error ? error.message : "PDF読込失敗");
+        try {
+          await renderWithPageImageFallback(error, canvas, context);
+        } catch (fallbackError) {
+          setStatus(fallbackError instanceof Error ? fallbackError.message : "PDF読込失敗");
         }
       }
+    }
     }
 
     void render();
@@ -143,8 +218,24 @@ export function PdfPreview({
     }
 
     const target = event.target as SVGElement;
-    if (target.dataset.fieldId) {
-      onSelectField(target.dataset.fieldId);
+    const fieldId = target.dataset.fieldId;
+    if (fieldId) {
+      const field = template.fields.find((item) => item.id === fieldId);
+      if (!field) {
+        return;
+      }
+
+      const handle = target.dataset.handle as ResizeHandle | undefined;
+      const point = pointerPoint(event);
+      onSelectField(fieldId);
+      setEditDrag({
+        fieldId,
+        mode: handle ? "resize" : "move",
+        handle,
+        start: point,
+        startRect: field.rect
+      });
+      event.currentTarget.setPointerCapture(event.pointerId);
       return;
     }
 
@@ -154,6 +245,20 @@ export function PdfPreview({
   }
 
   function handlePointerMove(event: React.PointerEvent<SVGSVGElement>) {
+    if (editDrag) {
+      const point = pointerPoint(event);
+      const delta = {
+        x: point.x - editDrag.start.x,
+        y: point.y - editDrag.start.y
+      };
+      const rect =
+        editDrag.mode === "resize" && editDrag.handle
+          ? resizeNormalizedRect(editDrag.startRect, editDrag.handle, delta, canvasSize)
+          : moveNormalizedRect(editDrag.startRect, delta, canvasSize);
+      onUpdateFieldRect(editDrag.fieldId, rect);
+      return;
+    }
+
     if (!drag) {
       return;
     }
@@ -161,6 +266,11 @@ export function PdfPreview({
   }
 
   function handlePointerUp(event: React.PointerEvent<SVGSVGElement>) {
+    if (editDrag) {
+      setEditDrag(null);
+      return;
+    }
+
     if (!drag || !template) {
       return;
     }
@@ -235,9 +345,37 @@ export function PdfPreview({
                 width={rect.width}
                 height={rect.height}
               />
-              <text x={rect.x + 6} y={Math.max(14, rect.y - 6)} className="field-label">
+              <text
+                data-field-id={field.id}
+                x={rect.x + 6}
+                y={Math.max(14, rect.y - 6)}
+                className="field-label"
+              >
                 {field.tag}
               </text>
+              {field.id === selectedFieldId
+                ? RESIZE_HANDLES.map((handle) => {
+                    const handleX = handle.includes("w")
+                      ? rect.x
+                      : rect.x + rect.width;
+                    const handleY = handle.includes("n")
+                      ? rect.y
+                      : rect.y + rect.height;
+
+                    return (
+                      <rect
+                        key={handle}
+                        data-field-id={field.id}
+                        data-handle={handle}
+                        className={`resize-handle handle-${handle}`}
+                        x={handleX - HANDLE_SIZE / 2}
+                        y={handleY - HANDLE_SIZE / 2}
+                        width={HANDLE_SIZE}
+                        height={HANDLE_SIZE}
+                      />
+                    );
+                  })
+                : null}
             </g>
           ))}
           {draftRect ? (

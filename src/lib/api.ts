@@ -62,5 +62,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ outputDir, documents })
     });
+  },
+
+  async saveExtractionsCsv(
+    outputDir: string,
+    documents: ExtractionDocument[]
+  ): Promise<{ outputDir: string; csv: string; rows: number }> {
+    return requestJson("/api/extractions/csv", {
+      method: "POST",
+      body: JSON.stringify({ outputDir, documents })
+    });
   }
 };

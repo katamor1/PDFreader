@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   createFieldFromDrag,
   fromNormalizedRect,
+  moveNormalizedRect,
+  resizeNormalizedRect,
   toNormalizedRect
 } from "../src/lib/templateGeometry";
 
@@ -37,5 +39,38 @@ describe("template geometry", () => {
     expect(field.tag).toBe("amount");
     expect(field.pageNumber).toBe(1);
     expect(field.rect).toEqual({ x: 0.2, y: 0.1, width: 0.5, height: 0.3 });
+  });
+
+  it("moves an existing normalized rectangle without letting it leave the page", () => {
+    expect(
+      moveNormalizedRect(
+        { x: 0.7, y: 0.7, width: 0.2, height: 0.2 },
+        { x: 200, y: 120 },
+        { width: 1000, height: 500 }
+      )
+    ).toEqual({ x: 0.8, y: 0.8, width: 0.2, height: 0.2 });
+  });
+
+  it("resizes an existing rectangle from a corner handle", () => {
+    expect(
+      resizeNormalizedRect(
+        { x: 0.2, y: 0.2, width: 0.3, height: 0.2 },
+        "se",
+        { x: 100, y: 50 },
+        { width: 1000, height: 500 }
+      )
+    ).toEqual({ x: 0.2, y: 0.2, width: 0.4, height: 0.3 });
+  });
+
+  it("keeps resized rectangles above the minimum visible size", () => {
+    expect(
+      resizeNormalizedRect(
+        { x: 0.2, y: 0.2, width: 0.3, height: 0.2 },
+        "nw",
+        { x: 400, y: 200 },
+        { width: 1000, height: 500 },
+        20
+      )
+    ).toEqual({ x: 0.48, y: 0.36, width: 0.02, height: 0.04 });
   });
 });

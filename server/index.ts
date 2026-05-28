@@ -6,14 +6,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildExtractionDocument, makeOutputFileName } from "../src/lib/extractionJson";
+import { buildExtractionCsv, makeCsvOutputFileName } from "../src/lib/extractionCsv";
 import type { ExtractionDocument, OcrTemplate } from "../src/lib/types";
+import { parseRangeHeader } from "./pdfHttp";
 import { findPdfFiles } from "./pdfScanner";
 import { TemplateStore } from "./templateStore";
+import { getPdfPageCount, rasterizePdfPage } from "./pdfTools";
 
 const app = express();
 const port = Number(process.env.PORT ?? 4174);
 const projectRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const dataDir = path.resolve(process.env.PDFREADER_DATA_DIR ?? path.join(projectRoot, "data"));
+const pageImageCacheDir = path.join(dataDir, "page-cache");
 const templateStore = new TemplateStore(dataDir);
 
 app.use(cors());
@@ -49,8 +53,75 @@ app.get("/api/pdf", async (request, response, next) => {
       return;
     }
 
-    response.type("application/pdf");
+    const range = parseRangeHeader(request.headers.range, stats.size);
+    response.setHeader("Accept-Ranges", "bytes");
+    response.setHeader("Content-Type", "application/pdf");
+
+    if (range) {
+      response.status(206);
+      response.setHeader("Content-Range", `bytes ${range.start}-${range.end}/${stats.size}`);
+      response.setHeader("Content-Length", String(range.contentLength));
+      createReadStream(resolvedPath, { start: range.start, end: range.end })
+        .on("error", next)
+        .pipe(response);
+      return;
+    }
+
+    response.setHeader("Content-Length", String(stats.size));
     createReadStream(resolvedPath)
+      .on("error", next)
+      .pipe(response);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/pdf-info", async (request, response, next) => {
+  try {
+    const pdfPath = String(request.query.path ?? "");
+    const resolvedPath = path.resolve(pdfPath);
+    const stats = await stat(resolvedPath);
+
+    if (!stats.isFile() || path.extname(resolvedPath).toLowerCase() !== ".pdf") {
+      response.status(404).json({ error: "PDF not found" });
+      return;
+    }
+
+    response.json({
+      path: resolvedPath,
+      sizeBytes: stats.size,
+      pages: await getPdfPageCount(resolvedPath)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/pdf-page-image", async (request, response, next) => {
+  try {
+    const pdfPath = String(request.query.path ?? "");
+    const resolvedPath = path.resolve(pdfPath);
+    const stats = await stat(resolvedPath);
+
+    if (!stats.isFile() || path.extname(resolvedPath).toLowerCase() !== ".pdf") {
+      response.status(404).json({ error: "PDF not found" });
+      return;
+    }
+
+    const pageNumber = Number(request.query.page ?? 1);
+    const dpi = Number(request.query.dpi ?? 180);
+    const image = await rasterizePdfPage({
+      pdfPath: resolvedPath,
+      pageNumber,
+      dpi,
+      cacheDir: pageImageCacheDir
+    });
+    const imageStats = await stat(image.imagePath);
+
+    response.setHeader("Content-Type", "image/png");
+    response.setHeader("Content-Length", String(imageStats.size));
+    response.setHeader("X-PDFReader-Render-Mode", image.fromCache ? "poppler-cache" : "poppler");
+    createReadStream(image.imagePath)
       .on("error", next)
       .pipe(response);
   } catch (error) {
@@ -112,6 +183,36 @@ app.post("/api/extractions", async (request, response, next) => {
     }
 
     response.json({ outputDir, written });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/extractions/csv", async (request, response, next) => {
+  try {
+    const documents = request.body?.documents as ExtractionDocument[] | undefined;
+    const outputDir = path.resolve(
+      String(request.body?.outputDir || path.join(dataDir, "output"))
+    );
+
+    if (!Array.isArray(documents) || documents.length === 0) {
+      response.status(400).json({ error: "documents must contain at least one item" });
+      return;
+    }
+
+    await mkdir(outputDir, { recursive: true });
+
+    const extractedAt = documents[0]?.extractedAt ?? new Date().toISOString();
+    const outputPath = path.join(outputDir, makeCsvOutputFileName(extractedAt));
+    await writeFile(outputPath, buildExtractionCsv(documents), "utf8");
+
+    response.json({
+      outputDir,
+      csv: outputPath,
+      rows: documents.reduce((sum, document) => {
+        return sum + document.pages.reduce((pageSum, page) => pageSum + page.fields.length, 0);
+      }, 0)
+    });
   } catch (error) {
     next(error);
   }

@@ -14,7 +14,13 @@ import { PdfPreview } from "./components/PdfPreview";
 import { api } from "./lib/api";
 import { buildExtractionDocument } from "./lib/extractionJson";
 import { createOcrWorker, recognizeTemplateFields } from "./lib/pdfOcr";
-import type { ExtractionDocument, OcrField, OcrTemplate, PdfFile } from "./lib/types";
+import type {
+  ExtractionDocument,
+  NormalizedRect,
+  OcrField,
+  OcrTemplate,
+  PdfFile
+} from "./lib/types";
 
 type Assignments = Record<string, string>;
 type JobState = {
@@ -178,6 +184,15 @@ export default function App() {
     }));
   }
 
+  function updateFieldRect(fieldId: string, rect: NormalizedRect) {
+    updateActiveTemplate((template) => ({
+      ...template,
+      fields: template.fields.map((field) =>
+        field.id === fieldId ? { ...field, rect } : field
+      )
+    }));
+  }
+
   function deleteSelectedField() {
     if (!selectedField) {
       return;
@@ -247,14 +262,30 @@ export default function App() {
     }
   }
 
+  async function saveCsv() {
+    const documents = Object.values(extractions);
+    if (documents.length === 0) {
+      return;
+    }
+
+    setJob({ running: true, message: "CSV保存中" });
+    try {
+      const result = await api.saveExtractionsCsv(outputDir, documents);
+      setOutputDir(result.outputDir);
+      setJob({ running: false, message: `${result.rows}行CSV保存` });
+    } catch (error) {
+      setJob({ running: false, message: error instanceof Error ? error.message : "CSV保存失敗" });
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
         <div className="brand">
-          <ScanText size={26} />
+            <ScanText size={26} />
           <div>
             <h1>PDFreader OCR</h1>
-            <p>矩形フォーマットからJSONを生成</p>
+            <p>矩形フォーマットからJSON/CSVを生成</p>
           </div>
         </div>
         <div className="status-strip">
@@ -280,7 +311,7 @@ export default function App() {
           検索
         </button>
         <label className="path-input">
-          <span>JSON出力先</span>
+          <span>出力先</span>
           <input
             value={outputDir}
             onChange={(event) => setOutputDir(event.target.value)}
@@ -294,6 +325,10 @@ export default function App() {
         <button type="button" onClick={saveJson} disabled={!Object.keys(extractions).length || job.running}>
           <Save size={17} />
           JSON保存
+        </button>
+        <button type="button" onClick={saveCsv} disabled={!Object.keys(extractions).length || job.running}>
+          <Save size={17} />
+          CSV保存
         </button>
       </section>
 
@@ -336,6 +371,7 @@ export default function App() {
           selectedFieldId={selectedFieldId}
           onSelectField={setSelectedFieldId}
           onAddField={addField}
+          onUpdateFieldRect={updateFieldRect}
         />
 
         <aside className="panel template-panel">

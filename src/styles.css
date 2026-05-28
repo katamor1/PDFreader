@@ -160,7 +160,7 @@ p {
   border-bottom: 1px solid #dbe0e6;
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(260px, 1.5fr) auto minmax(220px, 1fr) auto auto;
+  grid-template-columns: minmax(260px, 1.5fr) auto minmax(220px, 1fr) auto auto auto;
   padding: 12px 16px;
 }
 
@@ -334,6 +334,7 @@ p {
 }
 
 .field-rect.selected {
+  cursor: move;
   fill: rgba(161, 59, 42, 0.16);
   stroke: #a13b2a;
 }
@@ -345,12 +346,29 @@ p {
 }
 
 .field-label {
+  cursor: move;
   fill: #a13b2a;
   font-size: 13px;
   font-weight: 800;
   paint-order: stroke;
   stroke: #fff;
   stroke-width: 3px;
+}
+
+.resize-handle {
+  fill: #fff;
+  stroke: #a13b2a;
+  stroke-width: 2;
+}
+
+.handle-nw,
+.handle-se {
+  cursor: nwse-resize;
+}
+
+.handle-ne,
+.handle-sw {
+  cursor: nesw-resize;
 }
 
 .empty-preview {
